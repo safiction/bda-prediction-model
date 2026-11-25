@@ -1,0 +1,17 @@
+name: bda-inactivity-study
+
+services:
+  pipeline:
+    build: .
+    volumes:
+      - ./data/raw:/app/data/raw:ro
+      - ./data/late_delivery:/app/data/late_delivery:ro
+      - ./data/processed:/app/data/processed
+      - ./artifacts:/app/artifacts
+      - ./state:/app/state
+  app:
+    extends:
+      service: pipeline
+    ports:
+      - "127.0.0.1:8501:8501"
+    command: ["-m", "streamlit", "run", "src/app.py", "--server.address=0.0.0.0", "--server.port=8501"]

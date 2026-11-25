@@ -1,0 +1,47 @@
+{
+  "data_dir": "data",
+  "audit_dir": "artifacts/audit",
+  "processed_dir": "data/processed",
+  "snapshots_dir": "data/processed/snapshots",
+  "artifacts_dir": "artifacts",
+  "state_dir": "state",
+  "expected_days": 90,
+  "feature_window_days": 14,
+  "outcome_window_days": 14,
+  "label_delivery_lag_days": 1,
+  "malformed_csv_policy": "drop",
+  "snapshot_stride_days": 7,
+  "training_replay_days": [60, 67, 74],
+  "final_snapshot_day": 76,
+  "final_replay_day": 90,
+  "encodings": ["utf-8-sig", "cp1251", "latin-1"],
+  "timestamp_assumption": "Naive source timestamps share one dataset-local timezone; no timezone conversion.",
+  "allowed_sources": ["cdr", "tickets"],
+  "excluded_inputs": ["telemetry", "reference", "retention_contact", "text"],
+  "feature_allowlist": [
+    "event_count", "active_days", "days_since_last_activity",
+    "voice_count", "sms_count", "data_count", "voice_share", "sms_share", "data_share",
+    "total_voice_duration_sec", "avg_voice_duration_sec", "voice_duration_valid_share",
+    "total_bytes_up", "total_bytes_down", "avg_traffic_bytes_per_event", "traffic_valid_share",
+    "total_charge", "avg_charge", "charge_valid_share", "roaming_share", "roaming_known_share",
+    "events_last_7d", "events_previous_7d", "activity_change_ratio",
+    "ticket_count", "ticket_quality_count", "ticket_connection_count", "ticket_billing_count", "ticket_other_count",
+    "unresolved_ticket_count", "closed_ticket_count", "avg_resolution_hours", "resolution_missing"
+  ],
+  "spark": {"master": "local[2]", "driver_memory": "2g", "shuffle_partitions": 4},
+  "modeling": {
+    "seed": 42,
+    "threshold": 0.5,
+    "selection_metric": "pr_auc",
+    "pr_auc_definition": "average_precision_score",
+    "minimum_pr_auc_gain": 0.0,
+    "max_training_rows": 1000000,
+    "max_validation_rows": 300000,
+    "logistic_regression": {"max_iter": 1000, "class_weight": "balanced"},
+    "xgboost": {
+      "n_estimators": 60, "max_depth": 3, "learning_rate": 0.1,
+      "subsample": 0.8, "colsample_bytree": 0.8,
+      "tree_method": "hist", "eval_metric": "logloss", "n_jobs": 2
+    }
+  }
+}

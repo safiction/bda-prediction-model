@@ -1,0 +1,10 @@
+# Use Python 3.11 and Java 17 for the Spark pipeline.
+pyspark==3.5.7
+numpy==1.26.4
+scipy==1.14.1
+pandas==2.2.3
+pyarrow==18.1.0
+scikit-learn==1.5.2
+joblib==1.4.2
+xgboost-cpu==3.0.5
+streamlit==1.41.1
