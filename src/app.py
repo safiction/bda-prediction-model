@@ -2,7 +2,6 @@
 
 import os
 import sys
-from collections import deque
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -24,10 +23,6 @@ CONFIG_PATH = Path(os.environ.get("BDA_CONFIG", "config.json")).resolve()
 CONFIG = load_config(CONFIG_PATH)
 STATE, ARTIFACTS = Path(CONFIG["state_dir"]), Path(CONFIG["artifacts_dir"])
 MODEL_NAMES = {"logistic": "Logistic Regression", "xgboost": "XGBoost"}
-STAGES = {"queued": "В очереди", "ingest": "Загрузка", "clean": "Очистка", "snapshots": "Подготовка снимков",
-          "save": "Запись Parquet", "aggregate": "Дневные агрегаты",
-          "features": "Признаки", "labels": "Метки", "train": "Обучение", "freeze": "Фиксация прогнозов",
-          "evaluate": "Финальная оценка", "completed": "Завершено", "failed": "Ошибка", "interrupted": "Прервано"}
 
 
 def number(value, decimals=3):
@@ -64,48 +59,49 @@ def pipeline_view():
         st.rerun()
     ingest = read_json(STATE / "ingest.json", {})
     clock = replay_day(CONFIG)
-    st.header("Данные и pipeline")
-    st.caption("Последовательная обработка исторических данных. Обновление страницы не запускает новое задание.")
-    columns = st.columns(3)
-    card(columns[0], "День replay", str(clock))
-    card(columns[1], "Доступность данных", ingest.get("available_through", "Ещё не загружены"))
+    options = actions(CONFIG)
+    next_action = next((name for name, option in options.items() if option["enabled"]), None)
+    action = job["action"] if job else next_action
+    if action in ("prepare", "train"):
+        training_number = options[action]["training_number"]
+        if job and action == "prepare" and job.get("cutoff"):
+            training_number = CONFIG["training_replay_days"].index(job["cutoff"] - CONFIG["label_delivery_lag_days"]) + 1
+        step = f"Обучение {training_number} из {len(CONFIG['training_replay_days'])}"
+    else:
+        final_step = "Завершено" if (ARTIFACTS / "final_evaluation/comparison.json").exists() else "Нет доступных действий"
+        step = {"freeze": "Сохранение прогнозов", "evaluate": "Финальная проверка"}.get(action, final_step)
+    st.header("Демонстрация")
+    st.caption("Демонстрация на подготовленных данных. Обновление страницы не запускает новое задание.")
+    columns = st.columns(2)
+    card(columns[0], "Текущий шаг", step)
     active = read_json(STATE / "active_model.json", {})
     metadata = read_json(ARTIFACTS / "models" / active.get("version", "none") / "metadata.json", {})
-    card(columns[2], "Активная модель", MODEL_NAMES.get(metadata.get("model_name"), "Пока нет"))
+    card(columns[1], "Активная модель", MODEL_NAMES.get(metadata.get("model_name"), "Пока нет"))
+    if clock and ingest.get("available_through"):
+        historical_date = date.fromisoformat(ingest["available_through"]) - timedelta(days=ingest.get("through_day", clock) - clock)
+        st.caption(f"Историческая дата данных: {historical_date:%d.%m.%Y}")
+    else:
+        st.caption("Историческая дата появится после открытия данных.")
     if active:
         st.caption(f"Версия: {active['version']}")
     if job:
-        st.info(f"Выполняется: {STAGES.get(job['stage'], job['stage'])}")
-        if job.get("message"):
-            st.caption(job["message"])
-        if job.get("files_processed"):
-            st.write(f"Обработано файлов: **{job['files_processed']}**")
+        st.info("Задание выполняется. Результат появится автоматически.")
     elif last and last["status"] == "failed":
         st.error(last["error"])
-        st.caption("Последний успешный результат сохранён. Проверьте журнал и повторите доступное действие.")
+        st.caption("Последний успешный результат сохранён. Повторите доступное действие после устранения причины.")
     elif last:
         st.success("Последнее задание завершено")
 
-    options = actions(CONFIG)
     busy = job is not None or (STATE / "ingest.lock").exists()
-    st.subheader("Следующий шаг")
-    left, right = st.columns(2)
-    for column, action in ((left, "prepare"), (right, "train")):
-        if column.button(options[action]["label"], key=action, type="primary" if action == "prepare" else "secondary",
-                         disabled=busy or not options[action]["enabled"], use_container_width=True):
+    if action:
+        st.subheader("Следующее действие")
+        if st.button(options[action]["label"], key=action, type="primary", disabled=busy, use_container_width=True):
             launch(action)
-    if options["snapshots"]["enabled"] and not options["train"]["ready"]:
-        if st.button("Подготовить снимки текущей партии", disabled=busy):
-            launch("snapshots")
-    if clock >= CONFIG["training_replay_days"][-1] + CONFIG["label_delivery_lag_days"]:
-        left, right = st.columns(2)
-        for column, action in ((left, "freeze"), (right, "evaluate")):
-            if column.button(options[action]["label"], key=action, disabled=busy or not options[action]["enabled"], use_container_width=True):
-                launch(action)
-    st.caption("Обучение: этапы 60 / 67 / 74. Фиксация прогнозов: день 76. Финальные исходы: день 91 с учётом доставки.")
+    elif (ARTIFACTS / "final_evaluation/comparison.json").exists():
+        st.info("Обучения и финальная проверка завершены. Результаты доступны в истории моделей.")
 
     if ingest:
-        st.subheader("Качество и полнота")
+        st.subheader("Качество подготовленных данных")
         rows = []
         for source in ("cdr", "tickets"):
             quality = ingest["quality"][source]
@@ -121,15 +117,6 @@ def pipeline_view():
             dates = sorted(set(ingest["complete_cdr_dates"]) | set(ingest["complete_ticket_dates"]) | {ingest["loaded_event_end"]})
             st.dataframe(pd.DataFrame({"Дата": dates, "CDR": [value in ingest["complete_cdr_dates"] for value in dates],
                                       "Tickets": [value in ingest["complete_ticket_dates"] for value in dates]}), hide_index=True, use_container_width=True)
-    if last:
-        with st.expander("Журнал последнего задания", expanded=last["status"] == "failed"):
-            path = STATE / "jobs" / f"{last['job_id']}.log"
-            if path.exists():
-                with path.open(encoding="utf-8", errors="replace") as stream:
-                    lines = list(deque(stream, maxlen=40))
-                st.code("".join(lines), language="text")
-            else:
-                st.caption("Журнал появится после запуска обработчика")
     if st.button("Обновить состояние", key="refresh"):
         st.rerun()
 
@@ -166,11 +153,12 @@ def history_view():
                    "Исходы": f"{validation['outcome_start']} — {validation['outcome_end']}",
                    "Train строк": item["rows"]["training"], "Validation строк": run["rows"]["validation"],
                    "Доля неактивных": run["class_counts"]["validation"]["1"] / run["rows"]["validation"],
-                   "Обучение, с": item["fit_seconds"], **metrics}
+                   "Обучение, с": item["fit_seconds"], **metrics,
+                   "accuracy": (metrics["confusion_matrix"]["tn"] + metrics["confusion_matrix"]["tp"]) / sum(metrics["confusion_matrix"].values())}
             rows.append(row)
             if role == "Новая модель":
                 chart_rows.append({"Модель": row["Модель"], "Дата validation": validation["snapshot_date"], **metrics})
-    st.caption("PR-AUC — average precision. Окна validation меняются: оценки разных дат относятся к разным наблюдениям.")
+    st.caption("Accuracy — доля верных ответов; при дисбалансе классов смотрите также PR-AUC и recall. Окна validation меняются.")
     charts = pd.DataFrame(chart_rows)
     for column, metric, label in zip(st.columns(2), ("pr_auc", "log_loss"), ("PR-AUC по датам validation", "Log loss по датам validation")):
         with column:
@@ -182,20 +170,22 @@ def history_view():
                 tooltip=["Модель:N", "Дата validation:T", alt.Tooltip(f"{metric}:Q", format=".6f")]).properties(height=235)
             st.altair_chart(chart, use_container_width=True)
     frame = pd.DataFrame(rows)
-    columns = ["Модель", "Validation", "pr_auc", "log_loss", "roc_auc", "precision", "recall", "f1",
+    columns = ["Модель", "Validation", "pr_auc", "log_loss", "accuracy", "roc_auc", "precision", "recall", "f1",
                "Роль", "Активная", "Исходы", "Train строк", "Validation строк", "Доля неактивных", "Обучение, с", "Версия"]
     st.dataframe(frame[columns], hide_index=True, use_container_width=True,
                  column_config={name: st.column_config.NumberColumn(format="%.4f")
-                                for name in ("pr_auc", "log_loss", "roc_auc", "precision", "recall", "f1", "Доля неактивных", "Обучение, с")})
+                                for name in ("pr_auc", "log_loss", "accuracy", "roc_auc", "precision", "recall", "f1", "Доля неактивных", "Обучение, с")})
     with st.expander("Confusion matrix"):
         st.dataframe(pd.DataFrame([{"Версия": row["Версия"], "Validation": row["Validation"], **row["confusion_matrix"]} for row in rows]), hide_index=True, use_container_width=True)
     final = read_json(ARTIFACTS / "final_evaluation/comparison.json")
     st.subheader("Общая финальная когорта")
     if final:
         st.caption(f"Снимок {final['snapshot_date']}; исходы {final['outcome_start']} — {final['outcome_end']}. Модель была выбрана до раскрытия исходов.")
-        st.dataframe(pd.DataFrame(final["models"]).drop(columns="confusion_matrix"), hide_index=True, use_container_width=True)
+        comparison = pd.DataFrame(final["models"])
+        comparison["accuracy"] = [(row["confusion_matrix"]["tn"] + row["confusion_matrix"]["tp"]) / final["rows"] for row in final["models"]]
+        st.dataframe(comparison.drop(columns="confusion_matrix"), hide_index=True, use_container_width=True)
     else:
-        st.info("Исходы ожидаются. Финальное сравнение появится после фиксации на дне 76 и доставки исходов к дню 91.")
+        st.info("Исходы ожидаются. Финальное сравнение появится после сохранения прогнозов и открытия фактической активности.")
 
 
 @st.cache_data(show_spinner=False)
@@ -221,12 +211,12 @@ def prediction_view():
     else:
         options = snapshots
     selected = st.selectbox("Исторический снимок", options, index=len(options) - 1,
-                            format_func=lambda row: f"День {row['snapshot_day']} · {row['snapshot_date']}", key="snapshot")
+                            format_func=lambda row: date.fromisoformat(row["snapshot_date"]).strftime("%d.%m.%Y"), key="snapshot")
     day = selected["snapshot_day"]
     if frozen:
         features_path = ARTIFACTS / "final_predictions/features.parquet"
         versions = {version: versions[version] for version in frozen["thresholds"]}
-        st.caption("Зарезервированная финальная когорта: используются зафиксированные прогнозы дня 76.")
+        st.caption(f"Финальная когорта: используются прогнозы, зафиксированные {frozen['snapshot_date']}.")
         snapshot = frozen
         folder = None
     else:
@@ -234,8 +224,14 @@ def prediction_view():
         features_path = folder / "features"
     active = read_json(STATE / "active_model.json", {})["version"]
     choices = list(versions)
+    def model_label(version):
+        metadata = versions[version]
+        training_number = CONFIG["training_replay_days"].index(metadata["milestone"]) + 1
+        label = f"{MODEL_NAMES[metadata['model_name']]} · обучение {training_number} из {len(CONFIG['training_replay_days'])}"
+        return label + (" · активная" if version == active else "")
+
     version = st.selectbox("Версия модели", choices, index=choices.index(active) if active in choices else 0,
-        format_func=lambda value: f"{MODEL_NAMES[versions[value]['model_name']]} · этап {versions[value]['milestone']}" + (" · активная" if value == active else ""), key="model")
+                          format_func=model_label, key="model")
     st.caption(f"Версия: {version}")
     ids = eligible_ids(str(features_path))
     query = st.text_input("Поиск по ID", placeholder="Например, SUB000000000", key="query").strip().upper()
@@ -307,14 +303,14 @@ h2 {letter-spacing:-.025em;}
 </style>""", unsafe_allow_html=True)
 with st.sidebar:
     st.markdown('<div class="brand"><b>Неактивность абонентов</b><span>Учебный проект · BDA</span></div>', unsafe_allow_html=True)
-    section = st.radio("Раздел", ["Данные и pipeline", "История моделей", "Прогноз абонента"], label_visibility="collapsed", key="section")
+    section = st.radio("Раздел", ["Демонстрация", "История моделей", "Прогноз абонента"], label_visibility="collapsed", key="section")
     st.divider()
     st.caption("CDR + tickets\n\nОкно признаков: 14 дней\n\nГоризонт прогноза: 14 дней")
 st.markdown('<div class="eyebrow">CDR & TICKETS · HISTORICAL REPLAY</div>', unsafe_allow_html=True)
 st.title("Прогноз неактивности")
 st.caption("14-day inactivity proxy for churn · косвенный показатель оттока по отсутствию CDR-активности")
 try:
-    if section == "Данные и pipeline":
+    if section == "Демонстрация":
         pipeline_view()
     elif section == "История моделей":
         history_view()
@@ -322,4 +318,4 @@ try:
         prediction_view()
 except (ValueError, OSError, KeyError) as error:
     st.error(str(error))
-    st.caption("Проверьте состояние pipeline и журнал задания в разделе данных.")
+    st.caption("Проверьте подготовленные данные и доступность сохранённых моделей.")

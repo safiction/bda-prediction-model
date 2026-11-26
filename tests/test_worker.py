@@ -36,21 +36,36 @@ class WorkerTests(unittest.TestCase):
                     submit_job("prepare", path)
                 self.assertEqual(process.call_count, 1)
 
-    def test_failed_prepare_keeps_committed_clock_and_can_be_retried(self):
+    def test_training_numbers_follow_runs_instead_of_dataset_days(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, _ = self.fixture(Path(temporary))
+            state = Path(config["state_dir"])
+            options = actions(config)
+            self.assertTrue(options["prepare"]["enabled"])
+            self.assertEqual(options["prepare"]["training_number"], 2)
+            self.assertEqual(options["prepare"]["label"], "Открыть данные")
+            atomic_json(state / "ingest.json", {"through_day": 68, "fingerprint": "batch68"})
+            atomic_json(state / "snapshots.json", {"input_fingerprint": "batch68", "snapshots":
+                        [{"snapshot_day": day, "label_status": "mature"} for day in (14, 21, 28, 35, 53)]})
+            options = actions(config)
+            self.assertTrue(options["train"]["enabled"])
+            self.assertFalse(options["prepare"]["enabled"])
+            self.assertEqual(options["train"]["training_number"], 2)
+            self.assertEqual(options["train"]["label"], "Обучить модели")
+
+    def test_missing_prepared_data_keeps_clock_and_never_starts_preprocessing(self):
         with tempfile.TemporaryDirectory() as temporary:
             config, path = self.fixture(Path(temporary))
             with patch("src.worker.subprocess.Popen"):
                 job = submit_job("prepare", path)
 
-            def fail_after_ingest(config, job, module, arguments, stage):
-                if stage == "ingest":
-                    atomic_json(Path(config["state_dir"]) / "ingest.json", {"through_day": 68, "fingerprint": "batch68"})
-                else:
-                    raise RuntimeError("snapshot test failure")
-
-            with patch("src.worker.run_stage", side_effect=fail_after_ingest):
+            before = (Path(config["state_dir"]) / "ingest.json").read_bytes()
+            with patch("src.worker.reuse_prepared", return_value=False), patch("src.worker.run_command") as command:
                 result = run_job(job["job_id"], path)
+            command.assert_not_called()
             self.assertEqual(result["status"], "failed")
+            self.assertIn("Подготовленные данные", result["error"])
+            self.assertEqual((Path(config["state_dir"]) / "ingest.json").read_bytes(), before)
             self.assertEqual(replay_day(config), 61)
             self.assertTrue(actions(config)["prepare"]["enabled"])
             self.assertFalse((Path(config["state_dir"]) / "jobs/active.json").exists())
@@ -66,7 +81,7 @@ class WorkerTests(unittest.TestCase):
             (Path(config["state_dir"]) / "ingest.lock").write_text("999998")
             with patch("src.worker.process_alive", return_value=False):
                 self.assertIsNone(current_job(config))
-            self.assertEqual(read_json(jobs / f"{job['job_id']}.json")["stage"], "interrupted")
+            self.assertEqual(read_json(jobs / f"{job['job_id']}.json")["status"], "failed")
             self.assertFalse((Path(config["state_dir"]) / "ingest.lock").exists())
 
     def test_launch_failure_recorded_and_bad_actions_rejected(self):

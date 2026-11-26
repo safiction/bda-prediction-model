@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .final import read_json
 from .ingest import atomic_json
+from .prepared import reuse_prepared
 
 
 def load_config(path="config.json"):
@@ -61,13 +62,15 @@ def actions(config):
     evaluated = (Path(config["artifacts_dir"]) / "final_evaluation/comparison.json").exists()
     return {
         "prepare": {"enabled": next_cutoff is not None and previous_done, "cutoff": next_cutoff,
-                    "label": f"Загрузить следующую партию · день {next_cutoff}" if next_cutoff else "Партии обучения загружены"},
-        "snapshots": {"enabled": bool(current), "days": required, "label": "Подготовить снимки"},
-        "train": {"enabled": ready and not trained, "ready": ready, "milestone": current, "label": f"Обучить модели · этап {current}" if current else "Обучение недоступно"},
+                    "training_number": milestones.index(next_cutoff - lag) + 1 if next_cutoff is not None else None,
+                    "label": "Открыть данные"},
+        "train": {"enabled": ready and not trained, "milestone": current,
+                  "training_number": milestones.index(current) + 1 if current is not None else None,
+                  "label": "Обучить модели"},
         "freeze": {"enabled": clock in (milestones[-1] + lag, config["final_snapshot_day"]) and not frozen and
-                   all(completed_training(config, day) for day in milestones), "cutoff": config["final_snapshot_day"], "label": "Зафиксировать прогнозы · день 76"},
+                   all(completed_training(config, day) for day in milestones), "cutoff": config["final_snapshot_day"], "label": "Зафиксировать прогнозы"},
         "evaluate": {"enabled": frozen and not evaluated and clock in (config["final_snapshot_day"], config["final_replay_day"] + lag),
-                     "cutoff": config["final_replay_day"] + lag, "label": "Раскрыть исходы · день 91"},
+                     "cutoff": config["final_replay_day"] + lag, "label": "Проверить прогнозы"},
     }
 
 
@@ -96,7 +99,7 @@ def current_job(config):
     alive = process_alive(job.get("pid"), job["job_id"]) or process_alive(job.get("stage_pid"), "src.")
     if alive or time.time() - job["created_timestamp"] < 30:
         return job
-    job.update(status="failed", stage="interrupted", error="Обработчик остановлен. Последний успешный этап сохранён; повторите действие.", finished_at=now())
+    job.update(status="failed", error="Выполнение прервано. Последний успешный результат сохранён; повторите действие.", finished_at=now())
     atomic_json(jobs / f"{job['job_id']}.json", job)
     lock = Path(config["state_dir"]) / "ingest.lock"
     if lock.exists() and lock.read_text().strip() == str(job.get("stage_pid")):
@@ -118,9 +121,9 @@ def submit_job(action, config_path="config.json"):
     jobs = Path(config["state_dir"]) / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex
-    job = {"job_id": job_id, "action": action, "status": "queued", "stage": "queued",
+    job = {"job_id": job_id, "action": action, "status": "queued",
            "created_at": now(), "created_timestamp": time.time(), "pid": None, "stage_pid": None,
-           "config_path": str(config_path), "files_processed": 0}
+           "config_path": str(config_path)}
     # O_EXCL — общий барьер для двух вкладок или двух одновременных нажатий.
     with (jobs / "active.json").open("x", encoding="utf-8") as stream:
         json.dump(job, stream)
@@ -135,39 +138,24 @@ def submit_job(action, config_path="config.json"):
         # Освобождаем свою очередь до публикации ошибки запуска: новый submit
         # не должен потерять уже созданную им active.json.
         (jobs / "active.json").unlink(missing_ok=True)
-        job.update(status="failed", stage="failed", error=str(error), finished_at=now())
+        job.update(status="failed", error=str(error), finished_at=now())
         atomic_json(jobs / f"{job_id}.json", job)
         raise
 
 
-def run_stage(config, job, module, arguments, stage):
+def run_command(config, job, module, arguments):
     jobs = Path(config["state_dir"]) / "jobs"
-    job.update(stage=stage)
-    atomic_json(jobs / f"{job['job_id']}.json", job)
     command = [sys.executable, "-u", "-m", module, "--config", job["config_path"], *arguments]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+    process = subprocess.Popen(command, stderr=subprocess.STDOUT)
     job["stage_pid"] = process.pid
     atomic_json(jobs / f"{job['job_id']}.json", job)
-    for line in process.stdout:
-        print(line, end="", flush=True)
-        message = line.strip()
-        if message.startswith("Clean "):
-            job["files_processed"] += 1
-            job.update(stage="clean", message=message)
-        elif message.startswith("Stage: "):
-            job.update(stage=message.split()[1], message=message)
-        elif message.startswith(("Build features:", "Build labels:", "Fit ", "Frozen ")):
-            job.update(stage="features" if message.startswith("Build features") else "labels" if message.startswith("Build labels") else "train" if message.startswith("Fit") else "freeze", message=message)
-        else:
-            continue
-        atomic_json(jobs / f"{job['job_id']}.json", job)
     returncode = process.wait()
     lock = Path(config["state_dir"]) / "ingest.lock"
     if lock.exists() and lock.read_text().strip() == str(process.pid) and not process_alive(process.pid, "src."):
         lock.unlink()
     job["stage_pid"] = None
     if returncode:
-        raise RuntimeError(f"Этап {stage} завершился с ошибкой. Подробности в журнале задания.")
+        raise RuntimeError("Не удалось выполнить задание. Проверьте подготовленные данные и повторите попытку.")
 
 
 def run_job(job_id, config_path):
@@ -191,25 +179,23 @@ def run_job(job_id, config_path):
         if action in ("prepare", "freeze", "evaluate"):
             cutoff = option["cutoff"]
             job["cutoff"] = cutoff
-            run_stage(config, job, "src.ingest", ["--through-day", str(cutoff)], "ingest")
             if action == "prepare":
                 milestone = cutoff - config["label_delivery_lag_days"]
                 days = list(range(config["feature_window_days"], milestone - 2 * config["outcome_window_days"] + 1, config["snapshot_stride_days"]))
                 days.append(milestone - config["outcome_window_days"])
             else:
                 days = [config["final_snapshot_day"]]
-            run_stage(config, job, "src.snapshots", ["--snapshot-day", *map(str, days)], "snapshots")
+            if not reuse_prepared(config, cutoff, days):
+                raise ValueError(f"Подготовленные данные для дня {cutoff} не найдены или не соответствуют исходникам. Сначала подготовьте набор данных отдельно.")
             if action != "prepare":
-                run_stage(config, job, "src.final", [action], action)
+                run_command(config, job, "src.final", [action])
             atomic_json(replay, {"through_day": cutoff, "job_id": job_id,
                                  "input_fingerprint": read_json(Path(config["state_dir"]) / "ingest.json")["fingerprint"]})
-        elif action == "snapshots":
-            run_stage(config, job, "src.snapshots", ["--snapshot-day", *map(str, option["days"])], "snapshots")
         elif action == "train":
-            run_stage(config, job, "src.train", ["--milestone", str(option["milestone"])], "train")
-        job.update(status="completed", stage="completed", finished_at=now())
+            run_command(config, job, "src.train", ["--milestone", str(option["milestone"])])
+        job.update(status="completed", finished_at=now())
     except Exception as error:
-        job.update(status="failed", stage="failed", error=str(error), finished_at=now())
+        job.update(status="failed", error=str(error), finished_at=now())
     finally:
         atomic_json(jobs / f"{job_id}.json", job)
         if read_json(jobs / "active.json", {}).get("job_id") == job_id:

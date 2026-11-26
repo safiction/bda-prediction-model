@@ -22,6 +22,7 @@ def evaluate_predictions(target, probabilities, threshold=0.5):
     both_classes = len(np.unique(y)) == 2
     return {
         "log_loss": float(log_loss(y, probability, labels=[0, 1])),
+        "accuracy": float((tn + tp) / len(y)),
         "roc_auc": float(roc_auc_score(y, probability)) if both_classes else None,
         "pr_auc": float(average_precision_score(y, probability)) if both_classes else None,
         "precision": defined(precision_score(y, predicted, zero_division=np.nan)),
@@ -55,13 +56,13 @@ def write_comparison(path, run):
     lines = ["# Validation comparison", "", "Target: 14-day inactivity proxy for churn.", "",
              f"Milestone: {run['milestone']}; validation snapshot: {run['split']['validation']['snapshot_date']}.",
              "PR-AUC is average precision. Threshold is saved with each model. Validation rows are not resampled.", "",
-             "| Version | Role | Log loss | ROC-AUC | PR-AUC | Precision | Recall | F1 | TN / FP / FN / TP |",
-             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+             "| Version | Role | Log loss | Accuracy | ROC-AUC | PR-AUC | Precision | Recall | F1 | TN / FP / FN / TP |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
     entries = [(version, "new candidate", info["metrics"]) for version, info in run["candidates"].items()]
     if run["incumbent"] is not None:
         entries.append((run["parent_version"], "incumbent on current validation", run["incumbent"]["metrics"]))
     for version, role, metrics in entries:
-        scores = " | ".join(show(metrics[name]) for name in ("log_loss", "roc_auc", "pr_auc", "precision", "recall", "f1"))
+        scores = " | ".join(show(metrics[name]) for name in ("log_loss", "accuracy", "roc_auc", "pr_auc", "precision", "recall", "f1"))
         matrix = " / ".join(str(metrics["confusion_matrix"][name]) for name in ("tn", "fp", "fn", "tp"))
         lines.append(f"| {version} | {role} | {scores} | {matrix} |")
     lines += ["", f"Selected: {run['selected_version']}. {run['selection_reason']}", "",

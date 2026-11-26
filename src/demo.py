@@ -2,8 +2,6 @@
 
 import argparse
 import json
-import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -15,18 +13,12 @@ def next_action(options):
     for action in ("train", "prepare", "freeze", "evaluate"):
         if options[action]["enabled"]:
             return action
-    if options["snapshots"]["enabled"] and not options["train"]["ready"]:
-        return "snapshots"
     raise ValueError("No valid next step. Check job logs and replay state.")
 
 
 def run_demo(config_path="config.json", poll_seconds=5):
     config_path = Path(config_path).resolve()
     config = load_config(config_path)
-    audit = read_json(Path(config["audit_dir"]) / "audit.json", {})
-    rules = ("feature_window_days", "outcome_window_days", "expected_days", "label_delivery_lag_days", "malformed_csv_policy")
-    if audit.get("gate") != "passed" or any(audit.get("config", {}).get(name) != config[name] for name in rules):
-        subprocess.run([sys.executable, "-m", "src.audit", "--config", str(config_path)], check=True)
     watched = None
     last_message = None
     while True:
@@ -49,9 +41,9 @@ def run_demo(config_path="config.json", poll_seconds=5):
                 time.sleep(poll_seconds)
                 continue
         watched = job["job_id"]
-        message = (watched, job["status"], job["stage"], job.get("files_processed", 0))
+        message = (watched, job["status"])
         if message != last_message:
-            print(f"Replay {replay_day(config)} | {job['action']} | {job['stage']} | files {job.get('files_processed', 0)}", flush=True)
+            print(f"Replay {replay_day(config)} | {job['action']} | {job['status']}", flush=True)
             last_message = message
         time.sleep(poll_seconds)
 

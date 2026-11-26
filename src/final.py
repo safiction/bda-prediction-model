@@ -144,10 +144,10 @@ def evaluate_final(config):
                  f"Subscribers: {frozen['rows']:,}; class counts: {result['class_counts']} (1 = inactive).",
                  f"Active version selected before freezing: `{frozen['active_version']}`.", "",
                  "PR-AUC means average precision. All thresholds remain 0.5.", "",
-                 "| Version | PR-AUC | Log loss | ROC-AUC | Precision | Recall | F1 |",
-                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+                 "| Version | PR-AUC | Log loss | Accuracy | ROC-AUC | Precision | Recall | F1 |",
+                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for row in results:
-            values = " | ".join(f"{row[name]:.6f}" for name in ("pr_auc", "log_loss", "roc_auc", "precision", "recall", "f1"))
+            values = " | ".join(f"{row[name]:.6f}" for name in ("pr_auc", "log_loss", "accuracy", "roc_auc", "precision", "recall", "f1"))
             lines.append(f"| {row['version']} | {values} |")
         lines += ["", "| Version | TN | FP | FN | TP |", "| --- | ---: | ---: | ---: | ---: |"]
         for row in results:

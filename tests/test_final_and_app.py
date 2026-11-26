@@ -104,6 +104,11 @@ class FinalAndAppTests(unittest.TestCase):
             with patch.dict(os.environ, {"BDA_CONFIG": str(path)}):
                 app = AppTest.from_file("src/app.py", default_timeout=20).run()
                 self.assertFalse(app.exception)
+                self.assertFalse(app.code)
+                self.assertNotIn("Журнал последнего задания", [item.label for item in app.expander])
+                self.assertEqual(app.metric[0].value, "Обучение 2 из 3")
+                self.assertEqual([button.label for button in app.button if button.key != "refresh"], ["Открыть данные"])
+                self.assertTrue(any("Историческая дата данных: 30.11.2025" in item.value for item in app.caption))
                 app.radio(key="section").set_value("История моделей").run()
                 self.assertFalse(app.exception)
                 self.assertTrue(any("Исходы ожидаются" in element.value for element in app.info))

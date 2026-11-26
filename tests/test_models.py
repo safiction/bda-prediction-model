@@ -85,6 +85,7 @@ class ModelTests(unittest.TestCase):
         metrics = evaluate_predictions([0, 1], [0.1, 0.2])
         self.assertAlmostEqual(metrics["log_loss"], -(np.log(0.9) + np.log(0.2)) / 2)
         self.assertEqual(metrics["pr_auc"], 1.)
+        self.assertEqual(metrics["accuracy"], 0.5)
         self.assertIsNone(metrics["precision"])
         self.assertEqual(metrics["recall"], 0.)
         self.assertEqual(metrics["confusion_matrix"], {"tn": 1, "fp": 0, "fn": 1, "tp": 0})
